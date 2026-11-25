@@ -5,9 +5,9 @@ from datetime import datetime, timezone, timedelta
 
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "").strip()
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-default-rtdb.firebaseio.com").rstrip("/")
+TR_TZ = timezone(timedelta(hours=3))
 
-# Futbol için normal süre + duraklama/uzatma payı (dakika)
-MAX_CANLI_SURE_DK = 110
+MAX_CANLI_SURE_DK = 115
 
 def simdi_utc():
     return datetime.now(timezone.utc)
@@ -23,6 +23,18 @@ def parse_iso_utc(dt_str):
     except Exception:
         return None
 
+def dakika_etiketi_uret(gecen_dk):
+    if gecen_dk < 1:
+        return "1'"
+    if gecen_dk <= 45:
+        return f"{gecen_dk}'"
+    if gecen_dk <= 60:
+        return "İY"
+    ikinci_yari_dk = gecen_dk - 15
+    if ikinci_yari_dk <= 90:
+        return f"{ikinci_yari_dk}'"
+    return f"90+{ikinci_yari_dk - 90}'"
+
 def mac_durumu_hesapla(commence_time_str):
     """
     Döner: (canli: bool, bitti: bool, dakika_metni: str, saat_tr: str)
@@ -31,7 +43,7 @@ def mac_durumu_hesapla(commence_time_str):
     if not baslangic:
         return False, False, "", ""
 
-    saat_tr = baslangic.astimezone(timezone(timedelta(hours=3))).strftime("%H:%M")
+    saat_tr = baslangic.astimezone(TR_TZ).strftime("%H:%M")
     simdi = simdi_utc()
     gecen_sn = (simdi - baslangic).total_seconds()
 
@@ -39,29 +51,24 @@ def mac_durumu_hesapla(commence_time_str):
         return False, False, "", saat_tr
 
     gecen_dk = int(gecen_sn // 60)
-
-    # Standart maç süresini aşan maçları bitmiş sayıp bültenden çıkarıyoruz
     if gecen_dk > MAX_CANLI_SURE_DK:
         return False, True, "", saat_tr
 
-    # 0-45 ilk yarı, 45-60 devre arası/ikinci yarı geçişi, 60-90+ ikinci yarı gösterimi
-    if gecen_dk <= 45:
-        dk_str = f"{max(1, gecen_dk)}'"
-    elif gecen_dk <= 60:
-        dk_str = f"İY / {gecen_dk}'"
-    else:
-        dk_str = f"{gecen_dk}'"
+    return True, False, dakika_etiketi_uret(gecen_dk), saat_tr
 
-    return True, False, dk_str, saat_tr
+def api_istegi_at(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 BULTEN_VERISI = {
-    "tarih": simdi_utc().strftime("%Y-%m-%d"),
+    "tarih": simdi_utc().astimezone(TR_TZ).strftime("%Y-%m-%d"),
     "secimler": [
         {
             "mac": "Barcelona - Chelsea (22:00)",
             "canli": True,
             "bitti": False,
-            "dakika": "14'",
+            "dakika": "18'",
             "baslangic_saati": "22:00",
             "spor": "Futbol",
             "pazar": "Maç Sonucu",
@@ -69,7 +76,7 @@ BULTEN_VERISI = {
             "oran": 1.62,
             "gemini_guven": 86,
             "claude_guven": 84,
-            "not": "Yedek bülten verisi (Canlı maç örnek dakikası).",
+            "not": "Yedek bülten verisi (Canlı maç).",
             "secenek_guvenleri": {"MS 1": 86, "MS X": 80, "MS 2": 81},
             "oranlar": {"MS 1": 1.62, "MS X": 3.85, "MS 2": 4.90}
         },
@@ -85,28 +92,18 @@ BULTEN_VERISI = {
             "oran": 1.75,
             "gemini_guven": 85,
             "claude_guven": 83,
-            "not": "Henüz başlamamış maç.",
+            "not": "Yedek bülten verisi (Başlamamış maç).",
             "secenek_guvenleri": {"MS 1": 85, "MS X": 80, "MS 2": 80},
             "oranlar": {"MS 1": 1.75, "MS X": 3.60, "MS 2": 4.40}
         }
     ]
 }
 
-def oranlari_cek():
-    bugun = simdi_utc().strftime("%Y-%m-%d")
-    if not ODDS_API_KEY:
-        print("UYARI: ODDS_API_KEY bos, yedek veri kullaniliyor.")
-        return {**BULTEN_VERISI, "tarih": bugun}
-
-    url = f"https://api.the-odds-api.com/v4/sports/upcoming/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        games = json.loads(resp.read().decode("utf-8"))
-
-    print("API'den gelen toplam mac sayisi:", len(games) if isinstance(games, list) else 0)
-
-    secimler = []
+def maclari_donustur(games, limit=15):
+    sonuclar = []
     for g in (games or []):
+        if len(sonuclar) >= limit:
+            break
         home = g.get("home_team", "Ev")
         away = g.get("away_team", "Deplasman")
         spor_adi = g.get("sport_title") or g.get("sport_key") or "Spor"
@@ -132,7 +129,7 @@ def oranlari_cek():
         if oranlar:
             ilk_secim = "MS 1" if "MS 1" in oranlar else next(iter(oranlar.keys()))
             mac_etiketi = f"{home} - {away}" + (f" ({saat_tr})" if saat_tr else "")
-            secimler.append({
+            sonuclar.append({
                 "mac": mac_etiketi,
                 "canli": canli,
                 "bitti": False,
@@ -144,15 +141,45 @@ def oranlari_cek():
                 "oran": oranlar[ilk_secim],
                 "gemini_guven": 85,
                 "claude_guven": 83,
-                "not": f"{spor_adi} • Canli API verisi",
+                "not": f"{spor_adi} • Saat: {saat_tr or '-'}",
                 "secenek_guvenleri": {k: 85 for k in oranlar},
                 "oranlar": oranlar
             })
+    return sonuclar
 
-        if len(secimler) >= 20:
-            break
+def oranlari_cek():
+    bugun = simdi_utc().astimezone(TR_TZ).strftime("%Y-%m-%d")
+    if not ODDS_API_KEY:
+        print("UYARI: ODDS_API_KEY bos, yedek veri kullaniliyor.")
+        return {**BULTEN_VERISI, "tarih": bugun}
 
-    return {"tarih": bugun, "secimler": secimler}
+    toplanan = []
+    gorulen_maclar = set()
+
+    kaynaklar = [
+        f"https://api.the-odds-api.com/v4/sports/upcoming/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h",
+        f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
+    ]
+
+    for url in kaynaklar:
+        try:
+            games = api_istegi_at(url)
+            for item in maclari_donustur(games, limit=15):
+                anahtar = item["mac"].lower()
+                if anahtar not in gorulen_maclar:
+                    gorulen_maclar.add(anahtar)
+                    toplanan.append(item)
+        except Exception as e:
+            print("Kaynak uyarisi:", e)
+
+    canli_sayisi = sum(1 for x in toplanan if x.get("canli"))
+    baslamayan_sayisi = sum(1 for x in toplanan if not x.get("canli"))
+    print(f"Toplam: {len(toplanan)} | Canli: {canli_sayisi} | Baslamayan: {baslamayan_sayisi}")
+
+    if not toplanan:
+        return {**BULTEN_VERISI, "tarih": bugun}
+
+    return {"tarih": bugun, "secimler": toplanan[:25]}
 
 def firebase_yaz(veri):
     hedef = f"{FIREBASE_DB_URL}/bulten.json"
