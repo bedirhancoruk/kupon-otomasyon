@@ -2,10 +2,11 @@ import os
 import re
 import json
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone, timedelta
 
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "").strip()
-FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-default-rtdb.firebaseio.com").rstrip("/")
+FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-default-rtdb.firebaseio.com").strip()
 TR_TZ = timezone(timedelta(hours=3))
 
 MAX_CANLI_SURE_DK = 240
@@ -370,11 +371,28 @@ def oranlari_cek():
     return {"tarih": bugun, "secimler": birlesik}
 
 def firebase_yaz(veri):
-    hedef = f"{FIREBASE_DB_URL}/bulten.json"
-    govde = json.dumps(veri).encode("utf-8")
-    req = urllib.request.Request(hedef, data=govde, method="PUT", headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.status
+    base = FIREBASE_DB_URL.rstrip("/")
+    if base.endswith("/bulten.json"):
+        hedef = base
+    elif base.endswith("/bulten"):
+        hedef = f"{base}.json"
+    else:
+        hedef = f"{base}/bulten.json"
+
+    govde = json.dumps(veri, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        hedef,
+        data=govde,
+        method="PUT",
+        headers={"Content-Type": "application/json; charset=utf-8"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        detay = e.read().decode("utf-8", errors="replace")
+        print(f"Firebase HTTP {e.code} hatasi -> Hedef: {hedef} | Detay: {detay}")
+        raise
 
 if __name__ == "__main__":
     durum = firebase_yaz(oranlari_cek())
