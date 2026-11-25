@@ -17,6 +17,29 @@ NON_FOOTBALL_KEYWORDS = [
     "cricket", "rugby", "golf", "volleyball", "handball", "esports", "nfl", "americanfootball"
 ]
 
+TOP5_AND_SUPERLIG_KEYWORDS = [
+    "super lig", "süper lig", "galatasaray", "fenerbahce", "fenerbahçe",
+    "besiktas", "beşiktaş", "trabzonspor", "basaksehir", "başakşehir",
+    "konyaspor", "antalyaspor", "alanyaspor", "sivasspor", "kayserispor",
+    "kasimpasa", "kasımpaşa", "rizespor", "çaykur rizespor", "gaziantep", "hatayspor",
+    "samsunspor", "goztepe", "göztepe", "eyupspor", "eyüpspor", "bodrum",
+    "premier league", "epl", "manchester city", "manchester united", "arsenal",
+    "liverpool", "chelsea", "tottenham", "aston villa", "newcastle", "brighton",
+    "west ham", "everton", "fulham", "wolves", "wolverhampton", "brentford",
+    "crystal palace", "nottingham forest", "bournemouth", "leicester", "ipswich", "southampton",
+    "la liga", "real madrid", "barcelona", "atletico madrid", "atlético madrid",
+    "athletic bilbao", "real sociedad", "real betis", "villarreal", "sevilla",
+    "valencia", "celta vigo", "girona", "osasuna", "mallorca", "getafe", "las palmas", "alaves", "alavés",
+    "serie a", "inter", "ac milan", "milan", "juventus", "napoli",
+    "roma", "as roma", "lazio", "atalanta", "fiorentina", "bologna",
+    "torino", "udinese", "genoa", "monza", "cagliari", "empoli", "verona", "lecce", "como", "parma",
+    "bundesliga", "bayern munich", "bayern münih", "borussia dortmund", "bayer leverkusen",
+    "rb leipzig", "stuttgart", "eintracht frankfurt", "freiburg", "hoffenheim",
+    "wolfsburg", "werder bremen", "borussia monchengladbach", "mönchengladbach", "augsburg", "mainz", "bochum", "union berlin", "heidenheim",
+    "ligue 1", "paris saint-germain", "psg", "marseille", "monaco",
+    "lyon", "lille", "nice", "lens", "rennes", "strasbourg", "toulouse", "montpellier", "nantes", "reims", "brest", "auxerre"
+]
+
 IMPORTANT_KEYWORDS = [
     ("galatasaray", 45), ("fenerbahce", 45), ("fenerbahçe", 45),
     ("besiktas", 42), ("beşiktaş", 42), ("trabzonspor", 38),
@@ -31,6 +54,21 @@ IMPORTANT_KEYWORDS = [
     ("bundesliga", 28), ("serie a", 28), ("ligue 1", 25), ("world cup", 45), ("euro", 38)
 ]
 
+PAZAR_GRUPLARI = {
+    "MS 1": "Maç Sonucu",
+    "MS X": "Maç Sonucu",
+    "MS 2": "Maç Sonucu",
+    "ÇŞ 1-X": "Çifte Şans",
+    "ÇŞ 1-2": "Çifte Şans",
+    "ÇŞ X-2": "Çifte Şans",
+    "1.5 Üst": "1.5 Alt/Üst",
+    "2.5 Üst": "2.5 Alt/Üst",
+    "KG Var": "Karşılıklı Gol",
+    "İY/MS 1/1": "İY / MS",
+    "İY/MS 2/2": "İY / MS",
+    "H2 (-1.5)": "Handikaplı MS"
+}
+
 def simdi_tr():
     return datetime.now(TR_TZ)
 
@@ -43,9 +81,13 @@ def futbol_mu(spor_key="", spor_adi="", mac_adi=""):
         return False
     return "soccer" in str(spor_key).lower() or "football" in metin or "futbol" in metin
 
+def bes_buyuk_veya_super_lig_mu(mac_adi="", spor_adi="", spor_key=""):
+    metin = f"{mac_adi} {spor_adi} {spor_key}".lower()
+    return any(k in metin for k in TOP5_AND_SUPERLIG_KEYWORDS)
+
 def onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar):
     metin = f"{home} {away} {spor_adi} {spor_key}".lower()
-    puan = 10
+    puan = 35 if bes_buyuk_veya_super_lig_mu(metin, spor_adi, spor_key) else 10
     for anahtar, deger in IMPORTANT_KEYWORDS:
         if anahtar in metin:
             puan += deger
@@ -123,65 +165,102 @@ def mac_durumu_hesapla(commence_time_str, mac_adi=""):
 
     return False, False, "", 0, saat_tr
 
-def orana_gore_guven(oran, canli, gecen_dk):
+def tum_pazar_oranlari_turet(base_oranlar):
+    oranlar = dict(base_oranlar)
+    o1 = float(oranlar.get("MS 1", 2.30))
+    ox = float(oranlar.get("MS X", 3.40))
+    o2 = float(oranlar.get("MS 2", 2.80))
+
+    if "ÇŞ 1-X" not in oranlar:
+        oranlar["ÇŞ 1-X"] = round(max(1.30, 1.0 / (1.0 / max(1.05, o1) + 1.0 / max(1.05, ox)) * 0.92), 2)
+    if "ÇŞ 1-2" not in oranlar:
+        oranlar["ÇŞ 1-2"] = round(max(1.30, 1.0 / (1.0 / max(1.05, o1) + 1.0 / max(1.05, o2)) * 0.92), 2)
+    if "ÇŞ X-2" not in oranlar:
+        oranlar["ÇŞ X-2"] = round(max(1.30, 1.0 / (1.0 / max(1.05, ox) + 1.0 / max(1.05, o2)) * 0.92), 2)
+
+    fav_odd = min(o1, o2)
+    if "1.5 Üst" not in oranlar:
+        oranlar["1.5 Üst"] = round(max(1.30, min(1.85, 1.24 + (fav_odd - 1.40) * 0.22)), 2)
+    if "2.5 Üst" not in oranlar:
+        oranlar["2.5 Üst"] = round(max(1.50, min(2.45, 1.62 + (fav_odd - 1.50) * 0.30)), 2)
+    if "KG Var" not in oranlar:
+        oranlar["KG Var"] = round(max(1.50, min(2.35, 1.65 + abs(o1 - o2) * 0.18)), 2)
+    if "İY/MS 1/1" not in oranlar and o1 <= 2.40:
+        oranlar["İY/MS 1/1"] = round(max(1.65, o1 * 1.48), 2)
+    if "İY/MS 2/2" not in oranlar and o2 <= 2.40:
+        oranlar["İY/MS 2/2"] = round(max(1.65, o2 * 1.48), 2)
+    if "H2 (-1.5)" not in oranlar and o2 <= 1.75:
+        oranlar["H2 (-1.5)"] = round(max(1.55, o2 * 1.38), 2)
+
+    return oranlar
+
+def orana_gore_guven(secim, oran, canli, gecen_dk, is_top5_super):
     try:
         o = float(oran)
     except Exception:
         o = 2.0
 
-    if o <= 1.25:
-        baz = 90
-    elif o <= 1.45:
-        baz = 87
-    elif o <= 1.70:
-        baz = 84
-    elif o <= 2.05:
+    if o <= 1.35:
+        baz = 86
+    elif o <= 1.55:
+        baz = 83
+    elif o <= 1.80:
         baz = 80
-    elif o <= 2.60:
-        baz = 76
+    elif o <= 2.15:
+        baz = 77
     else:
-        baz = 72
+        baz = 74
+
+    pazar_bonus = 0
+    if secim in ("1.5 Üst", "ÇŞ 1-X", "ÇŞ 1-2", "ÇŞ X-2"):
+        pazar_bonus += 2
+    elif secim in ("2.5 Üst", "KG Var"):
+        pazar_bonus += 1
+
+    if is_top5_super:
+        pazar_bonus += 2
 
     if not canli:
-        return max(70, min(92, baz))
+        return max(72, min(92, baz + pazar_bonus))
 
-    if gecen_dk <= 15:
-        dk_farki = -1
-    elif gecen_dk <= 45:
-        dk_farki = 1 if o <= 1.65 else -1
-    elif gecen_dk <= 60:
-        dk_farki = 2 if o <= 1.65 else 0
+    if gecen_dk <= 20:
+        dk_farki = 0
+    elif gecen_dk <= 55:
+        dk_farki = 2 if o <= 1.85 else 0
     elif gecen_dk <= 75:
-        dk_farki = 1 if o <= 1.55 else -2
+        dk_farki = 1 if o <= 1.75 else -1
     else:
-        dk_farki = -2 if o <= 1.50 else -4
+        dk_farki = -2
 
-    return max(70, min(93, baz + dk_farki))
+    return max(72, min(93, baz + pazar_bonus + dk_farki))
 
-def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani):
+def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, is_top5_super):
     secenek_guvenleri = {}
     for secim, oran_degeri in oranlar.items():
-        secenek_guvenleri[secim] = orana_gore_guven(oran_degeri, canli, gecen_dk)
+        secenek_guvenleri[secim] = orana_gore_guven(secim, oran_degeri, canli, gecen_dk, is_top5_super)
 
-    aday_havuzu = secenek_guvenleri
-    if canli:
-        canli_uygun = {k: v for k, v in secenek_guvenleri.items() if float(oranlar.get(k, 0)) >= 1.50}
-        if canli_uygun:
-            aday_havuzu = canli_uygun
+    aday_havuzu = {
+        k: v for k, v in secenek_guvenleri.items()
+        if (not canli or float(oranlar.get(k, 0)) >= 1.50)
+    }
+    if not aday_havuzu:
+        aday_havuzu = secenek_guvenleri
 
     en_iyi_secim = max(aday_havuzu.items(), key=lambda x: x[1])[0]
     en_iyi_guven = secenek_guvenleri[en_iyi_secim]
+    pazar_adi = PAZAR_GRUPLARI.get(en_iyi_secim, "Maç Sonucu")
 
-    gemini_guven = max(70, min(94, en_iyi_guven + (1 if canli and gecen_dk <= 60 else 0)))
-    claude_guven = max(70, min(93, en_iyi_guven - (1 if canli and gecen_dk > 75 else 0)))
-    onem_etiketi = "Önemli Maç" if onem_puani >= 35 else "Bülten Maçı"
+    gemini_guven = max(72, min(94, en_iyi_guven + (1 if canli and gecen_dk <= 65 else 0)))
+    claude_guven = max(72, min(93, en_iyi_guven - (1 if canli and gecen_dk > 75 else 0)))
 
-    if canli:
-        not_metni = f"Canlı ({dk_str}) • {onem_etiketi} • 1.50+ oran takibi • {spor_adi}"
+    if canli and is_top5_super:
+        not_metni = f"Canlı ({dk_str}) • 5 Büyük/Süper Lig Güven Tahmini: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
+    elif canli:
+        not_metni = f"Canlı ({dk_str}) • {pazar_adi} • 1.50+ oran takibi • {spor_adi}"
     else:
-        not_metni = f"Başlamamış • {onem_etiketi} • Öne çıkan: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
+        not_metni = f"Başlamamış • {pazar_adi}: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
 
-    return en_iyi_secim, secenek_guvenleri, gemini_guven, claude_guven, not_metni
+    return en_iyi_secim, pazar_adi, secenek_guvenleri, gemini_guven, claude_guven, not_metni
 
 def api_istegi_at(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -212,23 +291,25 @@ def maclari_donustur(games, limit=50):
         if bitti:
             continue
 
-        oranlar = {}
+        baz_oranlar = {}
         for bm in g.get("bookmakers", [])[:1]:
             for mkt in bm.get("markets", []):
                 if mkt.get("key") == "h2h":
                     for oc in mkt.get("outcomes", []):
                         price = float(oc.get("price", 1.35))
                         if oc.get("name") == home:
-                            oranlar["MS 1"] = price
+                            baz_oranlar["MS 1"] = price
                         elif oc.get("name") == away:
-                            oranlar["MS 2"] = price
+                            baz_oranlar["MS 2"] = price
                         elif oc.get("name") == "Draw":
-                            oranlar["MS X"] = price
+                            baz_oranlar["MS X"] = price
 
-        if oranlar:
+        if baz_oranlar:
+            oranlar = tum_pazar_oranlari_turet(baz_oranlar)
+            is_top5_super = bes_buyuk_veya_super_lig_mu(f"{home} - {away}", spor_adi, spor_key)
             onem_puani = onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar)
-            en_iyi_secim, secenek_guvenleri, gemini_guven, claude_guven, not_metni = mac_analizi_olustur(
-                oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani
+            en_iyi_secim, pazar_adi, secenek_guvenleri, gemini_guven, claude_guven, not_metni = mac_analizi_olustur(
+                oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, is_top5_super
             )
             mac_etiketi = f"{home} - {away}" + (f" ({saat_tr})" if saat_tr else "")
             sonuclar.append({
@@ -239,8 +320,9 @@ def maclari_donustur(games, limit=50):
                 "baslangic_saati": saat_tr,
                 "spor": "Futbol",
                 "lig": spor_adi,
+                "top5_veya_super_lig": is_top5_super,
                 "onem_puani": onem_puani,
-                "pazar": "Maç Sonucu",
+                "pazar": pazar_adi,
                 "tahmin": en_iyi_secim,
                 "oran": oranlar[en_iyi_secim],
                 "gemini_guven": gemini_guven,
