@@ -8,16 +8,16 @@ ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "").strip()
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-default-rtdb.firebaseio.com").rstrip("/")
 TR_TZ = timezone(timedelta(hours=3))
 
-MAX_CANLI_SURE_DK = 125
+MAX_CANLI_SURE_DK = 240
 MAX_SECIM_SAYISI = 40
 
-BASKETBOL_VEYA_DISI_ANAHTARLAR = [
+NON_FOOTBALL_KEYWORDS = [
     "basketball", "nba", "euroleague", "eurocup", "ncaa", "wnba", "basketbol",
     "tennis", "hockey", "nhl", "baseball", "mlb", "mma", "ufc", "boxing",
     "cricket", "rugby", "golf", "volleyball", "handball", "esports", "nfl", "americanfootball"
 ]
 
-ONEMLI_TAKIM_VEYA_LIG_ANAHTARLARI = [
+IMPORTANT_KEYWORDS = [
     ("galatasaray", 45), ("fenerbahce", 45), ("fenerbahçe", 45),
     ("besiktas", 42), ("beşiktaş", 42), ("trabzonspor", 38),
     ("real madrid", 45), ("barcelona", 45), ("atletico madrid", 38), ("atlético madrid", 38),
@@ -39,20 +39,16 @@ def simdi_utc():
 
 def futbol_mu(spor_key="", spor_adi="", mac_adi=""):
     metin = f"{spor_key} {spor_adi} {mac_adi}".lower()
-    if any(k in metin for k in BASKETBOL_VEYA_DISI_ANAHTARLAR):
+    if any(k in metin for k in NON_FOOTBALL_KEYWORDS):
         return False
-    if "soccer" in metin or "football" in metin or "futbol" in metin:
-        return True
-    # The Odds API soccer endpointinden geliyorsa ve spor dışı anahtar yoksa futbol kabul et
-    return "soccer" in str(spor_key).lower()
+    return "soccer" in str(spor_key).lower() or "football" in metin or "futbol" in metin
 
 def onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar):
     metin = f"{home} {away} {spor_adi} {spor_key}".lower()
     puan = 10
-    for anahtar, deger in ONEMLI_TAKIM_VEYA_LIG_ANAHTARI:
+    for anahtar, deger in IMPORTANT_KEYWORDS:
         if anahtar in metin:
             puan += deger
-    # Favori maçları biraz daha öne çıkar
     if oranlar:
         en_dusuk = min(float(v) for v in oranlar.values() if float(v) > 1.0)
         if en_dusuk <= 1.80:
@@ -97,10 +93,8 @@ def saat_tr_gecmis_mi(saat_str):
         hh, mm = map(int, saat_str.split(":"))
         now_tr = simdi_tr()
         baslangic_tr = now_tr.replace(hour=hh, minute=mm, second=0, microsecond=0)
-
         if now_tr.hour < 6 and hh >= 18:
             baslangic_tr = baslangic_tr - timedelta(days=1)
-
         fark_sn = (now_tr - baslangic_tr).total_seconds()
         if fark_sn >= 0:
             return True, f"{hh:02d}:{mm:02d}", int(fark_sn // 60)
@@ -114,7 +108,6 @@ def mac_durumu_hesapla(commence_time_str, mac_adi=""):
         baslangic_tr = baslangic.astimezone(TR_TZ)
         saat_tr = baslangic_tr.strftime("%H:%M")
         gecen_sn = (simdi_utc() - baslangic).total_seconds()
-
         if gecen_sn >= 0:
             gecen_dk = int(gecen_sn // 60)
             if gecen_dk > MAX_CANLI_SURE_DK:
@@ -268,7 +261,6 @@ def oranlari_cek():
     canli_liste = []
     gorulen_maclar = set()
 
-    # Sadece futbol (soccer) maçları çekilir
     url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
     try:
         games = api_istegi_at(url)
