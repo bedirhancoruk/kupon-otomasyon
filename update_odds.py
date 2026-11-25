@@ -121,6 +121,76 @@ def dakika_etiketi_uret(gecen_dk):
         return f"{ikinci_yari_dk}'"
     return f"90+{ikinci_yari_dk - 90}'"
 
+def mac_dakikasi_coz(dk_str, gecen_dk=0):
+    if isinstance(gecen_dk, (int, float)) and gecen_dk > 0:
+        if gecen_dk <= 45:
+            return int(gecen_dk), False
+        if gecen_dk <= 60:
+            return 45, True
+        return min(105, int(gecen_dk) - 15), False
+
+    s = str(dk_str or "").strip()
+    if not s or s.upper() == "İY":
+        return 45, True
+    plus_m = re.match(r"^(\d+)\+(\d+)'?$", s)
+    if plus_m:
+        return int(plus_m.group(1)) + int(plus_m.group(2)), False
+    num_m = re.match(r"^(\d+)'?$", s)
+    if num_m:
+        return int(num_m.group(1)), False
+    return 1, False
+
+def dakika_faz_bilgisi(dk_str, gecen_dk=0):
+    dk, devre_arasi = mac_dakikasi_coz(dk_str, gecen_dk)
+    if devre_arasi:
+        return {
+            "dk": 45,
+            "faz_adi": "Devre Arası",
+            "canli_carpan": 1.01,
+            "aksiyon": "İkinci yarı tempo ve gol/üst senaryoları öne çıkıyor"
+        }
+    if dk <= 15:
+        return {
+            "dk": dk,
+            "faz_adi": "İlk 15 Dakika",
+            "canli_carpan": 0.98,
+            "aksiyon": "Erken tempo analizi; temkinli ve yüksek güvenli seçenekler izlenmeli"
+        }
+    if dk <= 35:
+        return {
+            "dk": dk,
+            "faz_adi": "İlk Yarı Ortası",
+            "canli_carpan": 1.01,
+            "aksiyon": "Oyun kurgusu oturdu; favori ve gol pazarları güçleniyor"
+        }
+    if dk <= 45:
+        return {
+            "dk": dk,
+            "faz_adi": "İlk Yarı Sonu",
+            "canli_carpan": 1.02,
+            "aksiyon": "Devre sonu baskısı; 1.5 Üst ve KG Var kırılma anında"
+        }
+    if dk <= 65:
+        return {
+            "dk": dk,
+            "faz_adi": "İkinci Yarı Girişi",
+            "canli_carpan": 1.03,
+            "aksiyon": "Maç açılıyor; 2.5 Üst, KG Var ve öne çıkan taraf güveni canlı"
+        }
+    if dk <= 78:
+        return {
+            "dk": dk,
+            "faz_adi": "Son Çeyrek Girişi",
+            "canli_carpan": 0.99,
+            "aksiyon": "Skor ve yorgunluk etkisi kritik; yüksek güvenli oranlar öncelikli"
+        }
+    return {
+        "dk": dk,
+        "faz_adi": "Son Dakikalar",
+        "canli_carpan": 0.95,
+        "aksiyon": "Final dakikaları; geç gol ve skor koruma riski yüksek"
+    }
+
 def basliktan_saat_cek(mac_adi):
     if not mac_adi:
         return ""
@@ -166,7 +236,7 @@ def mac_durumu_hesapla(commence_time_str, mac_adi=""):
 
     return False, False, "", 0, saat_tr
 
-def tum_pazar_oranlari_turet(base_oranlar):
+def tum_pazar_oranlari_turet(base_oranlar, canli=False, dk_str="", gecen_dk=0):
     oranlar = dict(base_oranlar)
     o1 = float(oranlar.get("MS 1", 2.30))
     ox = float(oranlar.get("MS X", 3.40))
@@ -193,9 +263,20 @@ def tum_pazar_oranlari_turet(base_oranlar):
     if "H2 (-1.5)" not in oranlar and o2 <= 1.75:
         oranlar["H2 (-1.5)"] = round(max(1.55, o2 * 1.38), 2)
 
+    if canli:
+        dk, _ = mac_dakikasi_coz(dk_str, gecen_dk)
+        for k, val in list(oranlar.items()):
+            fval = float(val)
+            if k in ("2.5 Üst", "KG Var") and 45 <= dk <= 75:
+                oranlar[k] = round(max(1.50, fval * 0.97), 2)
+            elif k in ("2.5 Üst", "KG Var") and dk > 75:
+                oranlar[k] = round(min(3.20, fval * 1.06), 2)
+            elif k.startswith("MS ") and dk >= 70:
+                oranlar[k] = round(max(1.15, fval * (0.95 if fval < 2.1 else 1.05)), 2)
+
     return oranlar
 
-def orana_gore_guven(secim, oran, canli, gecen_dk, is_top5_super):
+def orana_gore_guven(secim, oran, canli, gecen_dk, dk_str, is_top5_super, onem_puani):
     try:
         o = float(oran)
     except Exception:
@@ -212,33 +293,46 @@ def orana_gore_guven(secim, oran, canli, gecen_dk, is_top5_super):
     else:
         baz = 74
 
-    pazar_bonus = 0
+    pazar_etkisi = 0
     if secim in ("1.5 Üst", "ÇŞ 1-X", "ÇŞ 1-2", "ÇŞ X-2"):
-        pazar_bonus += 2
+        pazar_etkisi += 2
     elif secim in ("2.5 Üst", "KG Var"):
-        pazar_bonus += 1
+        pazar_etkisi += 1
 
     if is_top5_super:
-        pazar_bonus += 2
+        pazar_etkisi += 2
+    if onem_puani >= 50:
+        pazar_etkisi += 1
 
     if not canli:
-        return max(72, min(92, baz + pazar_bonus))
+        return max(72, min(92, baz + pazar_etkisi))
 
-    if gecen_dk <= 20:
-        dk_farki = 0
-    elif gecen_dk <= 55:
-        dk_farki = 2 if o <= 1.85 else 0
-    elif gecen_dk <= 75:
-        dk_farki = 1 if o <= 1.75 else -1
+    faz = dakika_faz_bilgisi(dk_str, gecen_dk)
+    dk = faz["dk"]
+    dk_farki = 0
+
+    if dk <= 15:
+        dk_farki = -1 if secim in ("2.5 Üst", "KG Var", "İY/MS 1/1", "İY/MS 2/2") else 0
+    elif dk <= 35:
+        dk_farki = 1 if secim in ("MS 1", "MS 2", "ÇŞ 1-X", "ÇŞ 1-2", "ÇŞ X-2", "1.5 Üst") else 0
+    elif dk <= 45:
+        dk_farki = 2 if secim in ("1.5 Üst", "2.5 Üst", "KG Var") else 0
+    elif dk <= 65:
+        dk_farki = 2 if secim in ("2.5 Üst", "KG Var", "MS 1", "MS 2") else 1
+    elif dk <= 78:
+        dk_farki = 1 if (secim in ("2.5 Üst", "KG Var") or o <= 1.75) else -2
     else:
-        dk_farki = -2
+        dk_farki = -3 if secim in ("2.5 Üst", "KG Var") else -2
 
-    return max(72, min(93, baz + pazar_bonus + dk_farki))
+    skoru = (baz + pazar_etkisi + dk_farki) * faz["canli_carpan"]
+    return max(71, min(93, int(round(skoru))))
 
 def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, is_top5_super):
     secenek_guvenleri = {}
     for secim, oran_degeri in oranlar.items():
-        secenek_guvenleri[secim] = orana_gore_guven(secim, oran_degeri, canli, gecen_dk, is_top5_super)
+        secenek_guvenleri[secim] = orana_gore_guven(
+            secim, oran_degeri, canli, gecen_dk, dk_str, is_top5_super, onem_puani
+        )
 
     aday_havuzu = {
         k: v for k, v in secenek_guvenleri.items()
@@ -247,17 +341,18 @@ def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, 
     if not aday_havuzu:
         aday_havuzu = secenek_guvenleri
 
-    en_iyi_secim = max(aday_havuzu.items(), key=lambda x: x[1])[0]
+    en_iyi_secim = max(aday_havuzu.items(), key=lambda x: (x[1], float(oranlar.get(x[0], 0))))[0]
     en_iyi_guven = secenek_guvenleri[en_iyi_secim]
     pazar_adi = PAZAR_GRUPLARI.get(en_iyi_secim, "Maç Sonucu")
 
-    gemini_guven = max(72, min(94, en_iyi_guven + (1 if canli and gecen_dk <= 65 else 0)))
-    claude_guven = max(72, min(93, en_iyi_guven - (1 if canli and gecen_dk > 75 else 0)))
+    faz = dakika_faz_bilgisi(dk_str, gecen_dk)
+    gemini_guven = max(72, min(94, en_iyi_guven + (1 if canli and faz["dk"] <= 65 else 0)))
+    claude_guven = max(72, min(93, en_iyi_guven - (1 if canli and faz["dk"] > 75 else 0)))
 
     if canli and is_top5_super:
-        not_metni = f"Canlı ({dk_str}) • 5 Büyük/Süper Lig Güven Tahmini: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
+        not_metni = f"Canlı ({dk_str} • {faz['faz_adi']}) • 5 Büyük/Süper Lig: {en_iyi_secim} (%{en_iyi_guven}) • {faz['aksiyon']}"
     elif canli:
-        not_metni = f"Canlı ({dk_str}) • {pazar_adi} • 1.50+ oran takibi • {spor_adi}"
+        not_metni = f"Canlı ({dk_str} • {faz['faz_adi']}) • {pazar_adi}: {en_iyi_secim} (%{en_iyi_guven}) • {faz['aksiyon']}"
     else:
         not_metni = f"Başlamamış • {pazar_adi}: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
 
@@ -306,18 +401,21 @@ def maclari_donustur(games, limit=50):
                             baz_oranlar["MS X"] = price
 
         if baz_oranlar:
-            oranlar = tum_pazar_oranlari_turet(baz_oranlar)
+            oranlar = tum_pazar_oranlari_turet(baz_oranlar, canli=canli, dk_str=dk_str, gecen_dk=gecen_dk)
             is_top5_super = bes_buyuk_veya_super_lig_mu(f"{home} - {away}", spor_adi, spor_key)
             onem_puani = onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar)
             en_iyi_secim, pazar_adi, secenek_guvenleri, gemini_guven, claude_guven, not_metni = mac_analizi_olustur(
                 oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, is_top5_super
             )
+            faz = dakika_faz_bilgisi(dk_str, gecen_dk)
             mac_etiketi = f"{home} - {away}" + (f" ({saat_tr})" if saat_tr else "")
             sonuclar.append({
                 "mac": mac_etiketi,
                 "canli": canli,
                 "bitti": False,
                 "dakika": dk_str,
+                "dakika_fazi": faz["faz_adi"] if canli else "Maç Önü",
+                "gecen_dakika": gecen_dk if canli else 0,
                 "baslangic_saati": saat_tr,
                 "spor": "Futbol",
                 "lig": spor_adi,
