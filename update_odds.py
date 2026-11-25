@@ -37,24 +37,90 @@ def dakika_etiketi_uret(gecen_dk):
 
 def mac_durumu_hesapla(commence_time_str):
     """
-    Döner: (canli: bool, bitti: bool, dakika_metni: str, saat_tr: str)
+    Döner: (canli: bool, bitti: bool, dakika_metni: str, gecen_dk: int, saat_tr: str)
     """
     baslangic = parse_iso_utc(commence_time_str)
     if not baslangic:
-        return False, False, "", ""
+        return False, False, "", 0, ""
 
     saat_tr = baslangic.astimezone(TR_TZ).strftime("%H:%M")
     simdi = simdi_utc()
     gecen_sn = (simdi - baslangic).total_seconds()
 
     if gecen_sn < 0:
-        return False, False, "", saat_tr
+        return False, False, "", 0, saat_tr
 
     gecen_dk = int(gecen_sn // 60)
     if gecen_dk > MAX_CANLI_SURE_DK:
-        return False, True, "", saat_tr
+        return False, True, "", gecen_dk, saat_tr
 
-    return True, False, dakika_etiketi_uret(gecen_dk), saat_tr
+    return True, False, dakika_etiketi_uret(gecen_dk), gecen_dk, saat_tr
+
+def orana_gore_guven(oran, canli, gecen_dk):
+    """
+    Oran ve canlı dakika bandına göre %72 - %93 arası güven puanı hesaplar.
+    """
+    try:
+        o = float(oran)
+    except Exception:
+        o = 2.0
+
+    if o <= 1.25:
+        baz = 90
+    elif o <= 1.45:
+        baz = 87
+    elif o <= 1.70:
+        baz = 84
+    elif o <= 2.05:
+        baz = 80
+    elif o <= 2.60:
+        baz = 76
+    else:
+        baz = 72
+
+    if not canli:
+        return max(70, min(92, baz))
+
+    # Canlı maçta dakika ilerledikçe süre riski ve tempo etkisi uygulanır
+    if gecen_dk <= 15:
+        dk_farki = -1
+    elif gecen_dk <= 45:
+        dk_farki = 1 if o <= 1.65 else -1
+    elif gecen_dk <= 60:
+        dk_farki = 2 if o <= 1.65 else 0
+    elif gecen_dk <= 75:
+        dk_farki = 1 if o <= 1.55 else -2
+    else:
+        dk_farki = -2 if o <= 1.50 else -4
+
+    return max(70, min(93, baz + dk_farki))
+
+def mac_analizi_olustur(home, away, oranlar, canli, gecen_dk, dk_str, spor_adi):
+    secenek_guvenleri = {}
+    for secim, oran_degeri in oranlar.items():
+        secenek_guvenleri[secim] = orana_gore_guven(oran_degeri, canli, gecen_dk)
+
+    # En yüksek güven puanına sahip seçeneği öne çıkar
+    en_iyi_secim = max(secenek_guvenleri.items(), key=lambda x: x[1])[0]
+    en_iyi_guven = secenek_guvenleri[en_iyi_secim]
+
+    gemini_guven = max(70, min(94, en_iyi_guven + (1 if canli and gecen_dk <= 60 else 0)))
+    claude_guven = max(70, min(93, en_iyi_guven - (1 if canli and gecen_dk > 75 else 0)))
+
+    if canli:
+        if gecen_dk <= 45:
+            bolum_notu = f"İlk yarı ({dk_str}) canlı analizi"
+        elif gecen_dk <= 60:
+            bolum_notu = f"Devre arası ({dk_str}) canlı analizi"
+        elif gecen_dk <= 75:
+            bolum_notu = f"İkinci yarı ({dk_str}) canlı analizi"
+        else:
+            bolum_notu = f"Son bölüm ({dk_str}) temkinli canlı analizi"
+        not_metni = f"{bolum_notu} • Öne çıkan: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
+    else:
+        not_metni = f"Maç öncesi analiz • Öne çıkan: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
+
+    return en_iyi_secim, secenek_guvenleri, gemini_guven, claude_guven, not_metni
 
 def api_istegi_at(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -68,7 +134,7 @@ BULTEN_VERISI = {
             "mac": "Barcelona - Chelsea (22:00)",
             "canli": True,
             "bitti": False,
-            "dakika": "18'",
+            "dakika": "24'",
             "baslangic_saati": "22:00",
             "spor": "Futbol",
             "pazar": "Maç Sonucu",
@@ -76,8 +142,8 @@ BULTEN_VERISI = {
             "oran": 1.62,
             "gemini_guven": 86,
             "claude_guven": 84,
-            "not": "Yedek bülten verisi (Canlı maç).",
-            "secenek_guvenleri": {"MS 1": 86, "MS X": 80, "MS 2": 81},
+            "not": "İlk yarı (24') canlı analizi • Öne çıkan: MS 1 (%85)",
+            "secenek_guvenleri": {"MS 1": 85, "MS X": 74, "MS 2": 72},
             "oranlar": {"MS 1": 1.62, "MS X": 3.85, "MS 2": 4.90}
         },
         {
@@ -90,10 +156,10 @@ BULTEN_VERISI = {
             "pazar": "Maç Sonucu",
             "tahmin": "MS 1",
             "oran": 1.75,
-            "gemini_guven": 85,
-            "claude_guven": 83,
-            "not": "Yedek bülten verisi (Başlamamış maç).",
-            "secenek_guvenleri": {"MS 1": 85, "MS X": 80, "MS 2": 80},
+            "gemini_guven": 80,
+            "claude_guven": 80,
+            "not": "Maç öncesi analiz • Öne çıkan: MS 1 (%80)",
+            "secenek_guvenleri": {"MS 1": 80, "MS X": 72, "MS 2": 72},
             "oranlar": {"MS 1": 1.75, "MS X": 3.60, "MS 2": 4.40}
         }
     ]
@@ -109,7 +175,7 @@ def maclari_donustur(games, limit=15):
         spor_adi = g.get("sport_title") or g.get("sport_key") or "Spor"
         commence = g.get("commence_time", "")
 
-        canli, bitti, dk_str, saat_tr = mac_durumu_hesapla(commence)
+        canli, bitti, dk_str, gecen_dk, saat_tr = mac_durumu_hesapla(commence)
         if bitti:
             continue
 
@@ -127,7 +193,9 @@ def maclari_donustur(games, limit=15):
                             oranlar["MS X"] = price
 
         if oranlar:
-            ilk_secim = "MS 1" if "MS 1" in oranlar else next(iter(oranlar.keys()))
+            en_iyi_secim, secenek_guvenleri, gemini_guven, claude_guven, not_metni = mac_analizi_olustur(
+                home, away, oranlar, canli, gecen_dk, dk_str, spor_adi
+            )
             mac_etiketi = f"{home} - {away}" + (f" ({saat_tr})" if saat_tr else "")
             sonuclar.append({
                 "mac": mac_etiketi,
@@ -137,12 +205,12 @@ def maclari_donustur(games, limit=15):
                 "baslangic_saati": saat_tr,
                 "spor": spor_adi,
                 "pazar": "Maç Sonucu",
-                "tahmin": ilk_secim,
-                "oran": oranlar[ilk_secim],
-                "gemini_guven": 85,
-                "claude_guven": 83,
-                "not": f"{spor_adi} • Saat: {saat_tr or '-'}",
-                "secenek_guvenleri": {k: 85 for k in oranlar},
+                "tahmin": en_iyi_secim,
+                "oran": oranlar[en_iyi_secim],
+                "gemini_guven": gemini_guven,
+                "claude_guven": claude_guven,
+                "not": not_metni,
+                "secenek_guvenleri": secenek_guvenleri,
                 "oranlar": oranlar
             })
     return sonuclar
