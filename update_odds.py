@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -7,8 +8,11 @@ ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "").strip()
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-default-rtdb.firebaseio.com").rstrip("/")
 TR_TZ = timezone(timedelta(hours=3))
 
-MAX_CANLI_SURE_DK = 115
+MAX_CANLI_SURE_DK = 125
 MAX_SECIM_SAYISI = 40
+
+def simdi_tr():
+    return datetime.now(TR_TZ)
 
 def simdi_utc():
     return datetime.now(timezone.utc)
@@ -17,7 +21,7 @@ def parse_iso_utc(dt_str):
     if not dt_str:
         return None
     try:
-        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(dt_str).replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
@@ -36,23 +40,55 @@ def dakika_etiketi_uret(gecen_dk):
         return f"{ikinci_yari_dk}'"
     return f"90+{ikinci_yari_dk - 90}'"
 
-def mac_durumu_hesapla(commence_time_str):
+def basliktan_saat_cek(mac_adi):
+    if not mac_adi:
+        return ""
+    m = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", str(mac_adi))
+    if not m:
+        return ""
+    return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
+
+def saat_tr_gecmis_mi(saat_str):
+    if not saat_str:
+        return False, "", 0
+    try:
+        hh, mm = map(int, saat_str.split(":"))
+        now_tr = simdi_tr()
+        baslangic_tr = now_tr.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+        # Gece yarısı eşiği: şu an gece 00-05 arasıysa ve maç saati akşam 20-23 ise dün başlamıştır
+        if now_tr.hour < 6 and hh >= 18:
+            baslangic_tr = baslangic_tr - timedelta(days=1)
+
+        fark_sn = (now_tr - baslangic_tr).total_seconds()
+        if fark_sn >= 0:
+            return True, f"{hh:02d}:{mm:02d}", int(fark_sn // 60)
+        return False, f"{hh:02d}:{mm:02d}", 0
+    except Exception:
+        return False, "", 0
+
+def mac_durumu_hesapla(commence_time_str, mac_adi=""):
     baslangic = parse_iso_utc(commence_time_str)
-    if not baslangic:
-        return False, False, "", 0, ""
+    if baslangic:
+        baslangic_tr = baslangic.astimezone(TR_TZ)
+        saat_tr = baslangic_tr.strftime("%H:%M")
+        gecen_sn = (simdi_utc() - baslangic).total_seconds()
 
-    saat_tr = baslangic.astimezone(TR_TZ).strftime("%H:%M")
-    simdi = simdi_utc()
-    gecen_sn = (simdi - baslangic).total_seconds()
+        if gecen_sn >= 0:
+            gecen_dk = int(gecen_sn // 60)
+            if gecen_dk > MAX_CANLI_SURE_DK:
+                return False, True, "", gecen_dk, saat_tr
+            return True, False, dakika_etiketi_uret(gecen_dk), gecen_dk, saat_tr
 
-    if gecen_sn < 0:
-        return False, False, "", 0, saat_tr
+    # ISO tarih yoksa veya gelecek görünüyorsa başlıktaki TR saatini kontrol et
+    etiket_saat = basliktan_saat_cek(mac_adi)
+    gecmis, saat_tr, gecen_dk = saat_tr_gecmis_mi(etiket_saat)
+    if gecmis:
+        if gecen_dk > MAX_CANLI_SURE_DK:
+            return False, True, "", gecen_dk, saat_tr
+        return True, False, dakika_etiketi_uret(gecen_dk), gecen_dk, saat_tr
 
-    gecen_dk = int(gecen_sn // 60)
-    if gecen_dk > MAX_CANLI_SURE_DK:
-        return False, True, "", gecen_dk, saat_tr
-
-    return True, False, dakika_etiketi_uret(gecen_dk), gecen_dk, saat_tr
+    return False, False, "", 0, saat_tr
 
 def orana_gore_guven(oran, canli, gecen_dk):
     try:
@@ -94,7 +130,6 @@ def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi):
     for secim, oran_degeri in oranlar.items():
         secenek_guvenleri[secim] = orana_gore_guven(oran_degeri, canli, gecen_dk)
 
-    # Canlı maçlarda 1.50+ oranlı seçenekler varsa önceliklendir
     aday_havuzu = secenek_guvenleri
     if canli:
         canli_uygun = {k: v for k, v in secenek_guvenleri.items() if float(oranlar.get(k, 0)) >= 1.50}
@@ -120,44 +155,11 @@ def api_istegi_at(url):
         return json.loads(resp.read().decode("utf-8"))
 
 BULTEN_VERISI = {
-    "tarih": simdi_utc().astimezone(TR_TZ).strftime("%Y-%m-%d"),
-    "secimler": [
-        {
-            "mac": "Barcelona - Chelsea (22:00)",
-            "canli": True,
-            "bitti": False,
-            "dakika": "24'",
-            "baslangic_saati": "22:00",
-            "spor": "Futbol",
-            "pazar": "Maç Sonucu",
-            "tahmin": "MS 1",
-            "oran": 1.62,
-            "gemini_guven": 85,
-            "claude_guven": 84,
-            "not": "Canlı (24') • 1.50+ oran takibi • Futbol",
-            "secenek_guvenleri": {"MS 1": 85, "MS X": 74, "MS 2": 72},
-            "oranlar": {"MS 1": 1.62, "MS X": 3.85, "MS 2": 4.90}
-        },
-        {
-            "mac": "Galatasaray - Porto (23:00)",
-            "canli": False,
-            "bitti": False,
-            "dakika": "",
-            "baslangic_saati": "23:00",
-            "spor": "Futbol",
-            "pazar": "Maç Sonucu",
-            "tahmin": "MS 1",
-            "oran": 1.75,
-            "gemini_guven": 80,
-            "claude_guven": 80,
-            "not": "Başlamamış • Öne çıkan: MS 1 (%80) • Futbol",
-            "secenek_guvenleri": {"MS 1": 80, "MS X": 72, "MS 2": 72},
-            "oranlar": {"MS 1": 1.75, "MS X": 3.60, "MS 2": 4.40}
-        }
-    ]
+    "tarih": simdi_tr().strftime("%Y-%m-%d"),
+    "secimler": []
 }
 
-def maclari_donustur(games, limit=35):
+def maclari_donustur(games, limit=40):
     sonuclar = []
     for g in (games or []):
         if len(sonuclar) >= limit:
@@ -167,7 +169,8 @@ def maclari_donustur(games, limit=35):
         spor_adi = g.get("sport_title") or g.get("sport_key") or "Spor"
         commence = g.get("commence_time", "")
 
-        canli, bitti, dk_str, gecen_dk, saat_tr = mac_durumu_hesapla(commence)
+        on_etiket = f"{home} - {away}"
+        canli, bitti, dk_str, gecen_dk, saat_tr = mac_durumu_hesapla(commence, on_etiket)
         if bitti:
             continue
 
@@ -208,7 +211,7 @@ def maclari_donustur(games, limit=35):
     return sonuclar
 
 def oranlari_cek():
-    bugun = simdi_utc().astimezone(TR_TZ).strftime("%Y-%m-%d")
+    bugun = simdi_tr().strftime("%Y-%m-%d")
     if not ODDS_API_KEY:
         print("UYARI: ODDS_API_KEY bos, yedek veri kullaniliyor.")
         return {**BULTEN_VERISI, "tarih": bugun}
@@ -237,9 +240,8 @@ def oranlari_cek():
         except Exception as e:
             print("Kaynak uyarisi:", e)
 
-    # Başlamamış maçlara daha fazla yer verip canlı maçlarla birleştir
-    birlesik = (baslamayan_liste[:30] + canli_liste[:10])[:MAX_SECIM_SAYISI]
-    print(f"Toplam: {len(birlesik)} | Canli: {len(canli_liste[:10])} | Baslamayan: {len(baslamayan_liste[:30])}")
+    birlesik = (canli_liste[:15] + baslamayan_liste[:25])[:MAX_SECIM_SAYISI]
+    print(f"Toplam: {len(birlesik)} | Canli: {len(canli_liste[:15])} | Baslamayan: {len(baslamayan_liste[:25])}")
 
     if not birlesik:
         return {**BULTEN_VERISI, "tarih": bugun}
