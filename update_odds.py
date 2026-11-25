@@ -370,6 +370,19 @@ def oranlari_cek():
 
     return {"tarih": bugun, "secimler": birlesik}
 
+def firebase_icin_temizle(deger):
+    if isinstance(deger, dict):
+        temiz_sozluk = {}
+        for anahtar, icerik in deger.items():
+            temiz_anahtar = re.sub(r"[.$#\[\]/]", "-", str(anahtar)).strip()
+            if not temiz_anahtar:
+                temiz_anahtar = "bos_anahtar"
+            temiz_sozluk[temiz_anahtar] = firebase_icin_temizle(icerik)
+        return temiz_sozluk
+    if isinstance(deger, list):
+        return [firebase_icin_temizle(eleman) for eleman in deger]
+    return deger
+
 def firebase_yaz(veri):
     base = FIREBASE_DB_URL.rstrip("/")
     if base.endswith("/bulten.json"):
@@ -379,7 +392,8 @@ def firebase_yaz(veri):
     else:
         hedef = f"{base}/bulten.json"
 
-    govde = json.dumps(veri, ensure_ascii=False).encode("utf-8")
+    temiz_veri = firebase_icin_temizle(veri)
+    govde = json.dumps(temiz_veri, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         hedef,
         data=govde,
