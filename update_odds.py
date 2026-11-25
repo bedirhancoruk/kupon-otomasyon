@@ -1,12 +1,13 @@
 import os
 import json
 import urllib.request
+from datetime import datetime, timezone
 
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "").strip()
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-default-rtdb.firebaseio.com").rstrip("/")
 
 BULTEN_VERISI = {
-    "tarih": "2026-11-25",
+    "tarih": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     "secimler": [
         {
             "mac": "Sabah FK - Barcelona (20:45)",
@@ -16,37 +17,16 @@ BULTEN_VERISI = {
             "gemini_guven": 88,
             "claude_guven": 86,
             "not": "GitHub otomasyonu ile guncellendi.",
-            "secenek_guvenleri": {"CS_X_2": 92, "MS_2": 90, "15_Ust": 88, "H2_eksi_15": 87, "H2_eksi_2": 81},
-            "oranlar": {"CS_X_2": 1.03, "MS_2": 1.14, "15_Ust": 1.1, "H2_eksi_15": 1.38, "H2_eksi_2": 1.65}
-        },
-        {
-            "mac": "Atletico Madrid - Viking FK (23:00)",
-            "pazar": "İY / MS",
-            "tahmin": "İY/MS 1/1",
-            "oran": 1.45,
-            "gemini_guven": 88,
-            "claude_guven": 86,
-            "not": "GitHub otomasyonu ile guncellendi.",
-            "secenek_guvenleri": {"CS_1_X": 92, "MS_1": 90, "IY_MS_1_1": 87, "15_Ust": 85},
-            "oranlar": {"CS_1_X": 1.05, "MS_1": 1.22, "IY_MS_1_1": 1.45, "15_Ust": 1.16}
-        },
-        {
-            "mac": "Paris Saint-Germain - Roma (23:00)",
-            "pazar": "Maç Sonucu",
-            "tahmin": "MS 1",
-            "oran": 1.36,
-            "gemini_guven": 87,
-            "claude_guven": 85,
-            "not": "GitHub otomasyonu ile guncellendi.",
-            "secenek_guvenleri": {"CS_1_X": 90, "15_Ust": 86, "MS_1": 86},
-            "oranlar": {"CS_1_X": 1.08, "MS_1": 1.36, "15_Ust": 1.15}
+            "secenek_guvenleri": {"ÇŞ X-2": 92, "MS 2": 90, "1.5 Üst": 88, "H2 (-1.5)": 87, "H2 (-2)": 81},
+            "oranlar": {"ÇŞ X-2": 1.03, "MS 2": 1.14, "1.5 Üst": 1.10, "H2 (-1.5)": 1.38, "H2 (-2)": 1.65}
         }
     ]
 }
 
 def oranlari_cek():
+    bugun = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if not ODDS_API_KEY:
-        return BULTEN_VERISI
+        return {**BULTEN_VERISI, "tarih": bugun}
 
     url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -66,19 +46,20 @@ def oranlari_cek():
                     for oc in mkt.get("outcomes", []):
                         price = float(oc.get("price", 1.35))
                         if oc.get("name") == home:
-                            oranlar["MS_1"] = price
+                            oranlar["MS 1"] = price
                             sec_oran = price
                         elif oc.get("name") == away:
-                            oranlar["MS_2"] = price
+                            oranlar["MS 2"] = price
                         elif oc.get("name") == "Draw":
-                            oranlar["MS_X"] = price
+                            oranlar["MS X"] = price
 
         if oranlar:
+            ilk_secim = "MS 1" if "MS 1" in oranlar else next(iter(oranlar.keys()))
             secimler.append({
                 "mac": f"{home} - {away}",
                 "pazar": "Maç Sonucu",
-                "tahmin": "MS 1",
-                "oran": sec_oran,
+                "tahmin": ilk_secim,
+                "oran": oranlar[ilk_secim],
                 "gemini_guven": 85,
                 "claude_guven": 83,
                 "not": "Canli API otomasyonu ile cekildi.",
@@ -86,7 +67,7 @@ def oranlari_cek():
                 "oranlar": oranlar
             })
 
-    return {"tarih": "2026-11-25", "secimler": secimler or BULTEN_VERISI["secimler"]}
+    return {"tarih": bugun, "secimler": secimler or BULTEN_VERISI["secimler"]}
 
 def firebase_yaz(veri):
     hedef = f"{FIREBASE_DB_URL}/bulten.json"
