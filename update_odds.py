@@ -11,11 +11,53 @@ TR_TZ = timezone(timedelta(hours=3))
 MAX_CANLI_SURE_DK = 125
 MAX_SECIM_SAYISI = 40
 
+BASKETBOL_VEYA_DISI_ANAHTARLAR = [
+    "basketball", "nba", "euroleague", "eurocup", "ncaa", "wnba", "basketbol",
+    "tennis", "hockey", "nhl", "baseball", "mlb", "mma", "ufc", "boxing",
+    "cricket", "rugby", "golf", "volleyball", "handball", "esports", "nfl", "americanfootball"
+]
+
+ONEMLI_TAKIM_VEYA_LIG_ANAHTARLARI = [
+    ("galatasaray", 45), ("fenerbahce", 45), ("fenerbahçe", 45),
+    ("besiktas", 42), ("beşiktaş", 42), ("trabzonspor", 38),
+    ("real madrid", 45), ("barcelona", 45), ("atletico madrid", 38), ("atlético madrid", 38),
+    ("manchester city", 44), ("manchester united", 40), ("arsenal", 42),
+    ("liverpool", 43), ("chelsea", 40), ("tottenham", 37),
+    ("bayern munich", 44), ("bayern münih", 44), ("borussia dortmund", 39), ("bayer leverkusen", 37),
+    ("inter", 41), ("ac milan", 40), ("milan", 40), ("juventus", 40), ("napoli", 38),
+    ("paris saint-germain", 41), ("psg", 41), ("benfica", 35), ("porto", 35), ("ajax", 35),
+    ("champions league", 35), ("europa league", 28), ("conference league", 20),
+    ("super lig", 28), ("süper lig", 28), ("premier league", 32), ("la liga", 30),
+    ("bundesliga", 28), ("serie a", 28), ("ligue 1", 25), ("world cup", 45), ("euro", 38)
+]
+
 def simdi_tr():
     return datetime.now(TR_TZ)
 
 def simdi_utc():
     return datetime.now(timezone.utc)
+
+def futbol_mu(spor_key="", spor_adi="", mac_adi=""):
+    metin = f"{spor_key} {spor_adi} {mac_adi}".lower()
+    if any(k in metin for k in BASKETBOL_VEYA_DISI_ANAHTARLAR):
+        return False
+    if "soccer" in metin or "football" in metin or "futbol" in metin:
+        return True
+    # The Odds API soccer endpointinden geliyorsa ve spor dışı anahtar yoksa futbol kabul et
+    return "soccer" in str(spor_key).lower()
+
+def onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar):
+    metin = f"{home} {away} {spor_adi} {spor_key}".lower()
+    puan = 10
+    for anahtar, deger in ONEMLI_TAKIM_VEYA_LIG_ANAHTARI:
+        if anahtar in metin:
+            puan += deger
+    # Favori maçları biraz daha öne çıkar
+    if oranlar:
+        en_dusuk = min(float(v) for v in oranlar.values() if float(v) > 1.0)
+        if en_dusuk <= 1.80:
+            puan += 6
+    return puan
 
 def parse_iso_utc(dt_str):
     if not dt_str:
@@ -56,7 +98,6 @@ def saat_tr_gecmis_mi(saat_str):
         now_tr = simdi_tr()
         baslangic_tr = now_tr.replace(hour=hh, minute=mm, second=0, microsecond=0)
 
-        # Gece yarısı eşiği: şu an gece 00-05 arasıysa ve maç saati akşam 20-23 ise dün başlamıştır
         if now_tr.hour < 6 and hh >= 18:
             baslangic_tr = baslangic_tr - timedelta(days=1)
 
@@ -80,7 +121,6 @@ def mac_durumu_hesapla(commence_time_str, mac_adi=""):
                 return False, True, "", gecen_dk, saat_tr
             return True, False, dakika_etiketi_uret(gecen_dk), gecen_dk, saat_tr
 
-    # ISO tarih yoksa veya gelecek görünüyorsa başlıktaki TR saatini kontrol et
     etiket_saat = basliktan_saat_cek(mac_adi)
     gecmis, saat_tr, gecen_dk = saat_tr_gecmis_mi(etiket_saat)
     if gecmis:
@@ -125,7 +165,7 @@ def orana_gore_guven(oran, canli, gecen_dk):
 
     return max(70, min(93, baz + dk_farki))
 
-def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi):
+def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani):
     secenek_guvenleri = {}
     for secim, oran_degeri in oranlar.items():
         secenek_guvenleri[secim] = orana_gore_guven(oran_degeri, canli, gecen_dk)
@@ -141,11 +181,12 @@ def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi):
 
     gemini_guven = max(70, min(94, en_iyi_guven + (1 if canli and gecen_dk <= 60 else 0)))
     claude_guven = max(70, min(93, en_iyi_guven - (1 if canli and gecen_dk > 75 else 0)))
+    onem_etiketi = "Önemli Maç" if onem_puani >= 35 else "Bülten Maçı"
 
     if canli:
-        not_metni = f"Canlı ({dk_str}) • 1.50+ oran takibi • {spor_adi}"
+        not_metni = f"Canlı ({dk_str}) • {onem_etiketi} • 1.50+ oran takibi • {spor_adi}"
     else:
-        not_metni = f"Başlamamış • Öne çıkan: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
+        not_metni = f"Başlamamış • {onem_etiketi} • Öne çıkan: {en_iyi_secim} (%{en_iyi_guven}) • {spor_adi}"
 
     return en_iyi_secim, secenek_guvenleri, gemini_guven, claude_guven, not_metni
 
@@ -159,15 +200,19 @@ BULTEN_VERISI = {
     "secimler": []
 }
 
-def maclari_donustur(games, limit=40):
+def maclari_donustur(games, limit=50):
     sonuclar = []
     for g in (games or []):
         if len(sonuclar) >= limit:
             break
         home = g.get("home_team", "Ev")
         away = g.get("away_team", "Deplasman")
-        spor_adi = g.get("sport_title") or g.get("sport_key") or "Spor"
+        spor_key = g.get("sport_key") or "soccer"
+        spor_adi = g.get("sport_title") or "Futbol"
         commence = g.get("commence_time", "")
+
+        if not futbol_mu(spor_key, spor_adi, f"{home} - {away}"):
+            continue
 
         on_etiket = f"{home} - {away}"
         canli, bitti, dk_str, gecen_dk, saat_tr = mac_durumu_hesapla(commence, on_etiket)
@@ -188,8 +233,9 @@ def maclari_donustur(games, limit=40):
                             oranlar["MS X"] = price
 
         if oranlar:
+            onem_puani = onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar)
             en_iyi_secim, secenek_guvenleri, gemini_guven, claude_guven, not_metni = mac_analizi_olustur(
-                oranlar, canli, gecen_dk, dk_str, spor_adi
+                oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani
             )
             mac_etiketi = f"{home} - {away}" + (f" ({saat_tr})" if saat_tr else "")
             sonuclar.append({
@@ -198,7 +244,9 @@ def maclari_donustur(games, limit=40):
                 "bitti": False,
                 "dakika": dk_str,
                 "baslangic_saati": saat_tr,
-                "spor": spor_adi,
+                "spor": "Futbol",
+                "lig": spor_adi,
+                "onem_puani": onem_puani,
                 "pazar": "Maç Sonucu",
                 "tahmin": en_iyi_secim,
                 "oran": oranlar[en_iyi_secim],
@@ -220,28 +268,27 @@ def oranlari_cek():
     canli_liste = []
     gorulen_maclar = set()
 
-    kaynaklar = [
-        f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h",
-        f"https://api.the-odds-api.com/v4/sports/upcoming/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
-    ]
+    # Sadece futbol (soccer) maçları çekilir
+    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
+    try:
+        games = api_istegi_at(url)
+        for item in maclari_donustur(games, limit=80):
+            anahtar = item["mac"].lower()
+            if anahtar in gorulen_maclar:
+                continue
+            gorulen_maclar.add(anahtar)
+            if item.get("canli"):
+                canli_liste.append(item)
+            else:
+                baslamayan_liste.append(item)
+    except Exception as e:
+        print("Futbol kaynagi uyarisi:", e)
 
-    for url in kaynaklar:
-        try:
-            games = api_istegi_at(url)
-            for item in maclari_donustur(games, limit=40):
-                anahtar = item["mac"].lower()
-                if anahtar in gorulen_maclar:
-                    continue
-                gorulen_maclar.add(anahtar)
-                if item.get("canli"):
-                    canli_liste.append(item)
-                else:
-                    baslamayan_liste.append(item)
-        except Exception as e:
-            print("Kaynak uyarisi:", e)
+    canli_liste.sort(key=lambda x: x.get("onem_puani", 0), reverse=True)
+    baslamayan_liste.sort(key=lambda x: x.get("onem_puani", 0), reverse=True)
 
     birlesik = (canli_liste[:15] + baslamayan_liste[:25])[:MAX_SECIM_SAYISI]
-    print(f"Toplam: {len(birlesik)} | Canli: {len(canli_liste[:15])} | Baslamayan: {len(baslamayan_liste[:25])}")
+    print(f"Futbol Toplam: {len(birlesik)} | Canli: {len(canli_liste[:15])} | Baslamayan: {len(baslamayan_liste[:25])}")
 
     if not birlesik:
         return {**BULTEN_VERISI, "tarih": bugun}
