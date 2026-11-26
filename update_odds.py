@@ -10,7 +10,7 @@ FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-defaul
 TR_TZ = timezone(timedelta(hours=3))
 
 MAX_CANLI_SURE_DK = 240
-MAX_SECIM_SAYISI = 40
+MAX_SECIM_SAYISI = 80
 
 NON_FOOTBALL_KEYWORDS = [
     "basketball", "nba", "euroleague", "eurocup", "ncaa", "wnba", "basketbol",
@@ -63,10 +63,15 @@ PAZAR_GRUPLARI = {
     "ÇŞ 1-2": "Çifte Şans",
     "ÇŞ X-2": "Çifte Şans",
     "1.5 Üst": "1.5 Alt/Üst",
+    "1.5 Alt": "1.5 Alt/Üst",
     "2.5 Üst": "2.5 Alt/Üst",
+    "2.5 Alt": "2.5 Alt/Üst",
+    "3.5 Üst": "3.5 Alt/Üst",
     "KG Var": "Karşılıklı Gol",
+    "KG Yok": "Karşılıklı Gol",
     "İY/MS 1/1": "İY / MS",
     "İY/MS 2/2": "İY / MS",
+    "H1 (-1.5)": "Handikaplı MS",
     "H2 (-1.5)": "Handikaplı MS"
 }
 
@@ -86,16 +91,20 @@ def bes_buyuk_veya_super_lig_mu(mac_adi="", spor_adi="", spor_key=""):
     metin = f"{mac_adi} {spor_adi} {spor_key}".lower()
     return any(k in metin for k in TOP5_AND_SUPERLIG_KEYWORDS)
 
-def onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar):
+def otomatik_onem_puani(home, away, spor_adi, spor_key, oranlar, canli):
     metin = f"{home} {away} {spor_adi} {spor_key}".lower()
-    puan = 35 if bes_buyuk_veya_super_lig_mu(metin, spor_adi, spor_key) else 10
+    puan = 35 if bes_buyuk_veya_super_lig_mu(metin, spor_adi, spor_key) else 20
+    if canli:
+        puan += 10
     for anahtar, deger in IMPORTANT_KEYWORDS:
         if anahtar in metin:
             puan += deger
     if oranlar:
         en_dusuk = min(float(v) for v in oranlar.values() if float(v) > 1.0)
-        if en_dusuk <= 1.80:
-            puan += 6
+        if en_dusuk <= 1.65:
+            puan += 8
+        elif en_dusuk <= 2.00:
+            puan += 4
     return puan
 
 def parse_iso_utc(dt_str):
@@ -153,15 +162,15 @@ def dakika_faz_bilgisi(dk_str, gecen_dk=0):
         return {
             "dk": dk,
             "faz_adi": "İlk 15 Dakika",
-            "canli_carpan": 0.98,
-            "aksiyon": "Erken tempo analizi; temkinli ve yüksek güvenli seçenekler izlenmeli"
+            "canli_carpan": 0.99,
+            "aksiyon": "Erken tempo; yüksek güvenli pazarlar öncelikli"
         }
     if dk <= 35:
         return {
             "dk": dk,
             "faz_adi": "İlk Yarı Ortası",
             "canli_carpan": 1.01,
-            "aksiyon": "Oyun kurgusu oturdu; favori ve gol pazarları güçleniyor"
+            "aksiyon": "Ritim oturdu; favori ve gol pazarları güçleniyor"
         }
     if dk <= 45:
         return {
@@ -174,20 +183,20 @@ def dakika_faz_bilgisi(dk_str, gecen_dk=0):
         return {
             "dk": dk,
             "faz_adi": "İkinci Yarı Girişi",
-            "canli_carpan": 1.03,
-            "aksiyon": "Maç açılıyor; 2.5 Üst, KG Var ve öne çıkan taraf güveni canlı"
+            "canli_carpan": 1.02,
+            "aksiyon": "Maç açılıyor; 2.5 Üst, KG Var ve ana seçenek canlı"
         }
     if dk <= 78:
         return {
             "dk": dk,
             "faz_adi": "Son Çeyrek Girişi",
             "canli_carpan": 0.99,
-            "aksiyon": "Skor ve yorgunluk etkisi kritik; yüksek güvenli oranlar öncelikli"
+            "aksiyon": "Skor ve yorgunluk etkisi kritik; 1.50+ güvenli seçenekler"
         }
     return {
         "dk": dk,
         "faz_adi": "Son Dakikalar",
-        "canli_carpan": 0.95,
+        "canli_carpan": 0.97,
         "aksiyon": "Final dakikaları; geç gol ve skor koruma riski yüksek"
     }
 
@@ -236,96 +245,127 @@ def mac_durumu_hesapla(commence_time_str, mac_adi=""):
 
     return False, False, "", 0, saat_tr
 
-def tum_pazar_oranlari_turet(base_oranlar, canli=False, dk_str="", gecen_dk=0):
-    oranlar = dict(base_oranlar)
-    o1 = float(oranlar.get("MS 1", 2.30))
-    ox = float(oranlar.get("MS X", 3.40))
-    o2 = float(oranlar.get("MS 2", 2.80))
+def cifte_sans_orani(oa, ob, tekli_oran):
+    try:
+        a = max(1.05, float(oa))
+        b = max(1.05, float(ob))
+        t = float(tekli_oran) if tekli_oran and float(tekli_oran) > 1.0 else 9.99
+        ham = 1.0 / ((1.0 / a) + (1.0 / b)) * 0.94
+        return round(max(1.30, min(t - 0.05, ham)), 2)
+    except Exception:
+        return 1.35
+
+def tum_pazar_oranlari_turet(base_oranlar):
+    oranlar = {}
+    for k, v in (base_oranlar or {}).items():
+        try:
+            fv = round(float(v), 2)
+            if fv > 1.0:
+                oranlar[k] = fv
+        except Exception:
+            continue
+
+    o1 = oranlar.get("MS 1", 2.30)
+    ox = oranlar.get("MS X", 3.40)
+    o2 = oranlar.get("MS 2", 2.80)
 
     if "ÇŞ 1-X" not in oranlar:
-        oranlar["ÇŞ 1-X"] = round(max(1.30, 1.0 / (1.0 / max(1.05, o1) + 1.0 / max(1.05, ox)) * 0.92), 2)
+        oranlar["ÇŞ 1-X"] = cifte_sans_orani(o1, ox, o1)
     if "ÇŞ 1-2" not in oranlar:
-        oranlar["ÇŞ 1-2"] = round(max(1.30, 1.0 / (1.0 / max(1.05, o1) + 1.0 / max(1.05, o2)) * 0.92), 2)
+        oranlar["ÇŞ 1-2"] = cifte_sans_orani(o1, o2, min(o1, o2))
     if "ÇŞ X-2" not in oranlar:
-        oranlar["ÇŞ X-2"] = round(max(1.30, 1.0 / (1.0 / max(1.05, ox) + 1.0 / max(1.05, o2)) * 0.92), 2)
+        oranlar["ÇŞ X-2"] = cifte_sans_orani(ox, o2, o2)
 
     fav_odd = min(o1, o2)
-    if "1.5 Üst" not in oranlar:
-        oranlar["1.5 Üst"] = round(max(1.30, min(1.85, 1.24 + (fav_odd - 1.40) * 0.22)), 2)
-    if "2.5 Üst" not in oranlar:
-        oranlar["2.5 Üst"] = round(max(1.50, min(2.45, 1.62 + (fav_odd - 1.50) * 0.30)), 2)
-    if "KG Var" not in oranlar:
-        oranlar["KG Var"] = round(max(1.50, min(2.35, 1.65 + abs(o1 - o2) * 0.18)), 2)
-    if "İY/MS 1/1" not in oranlar and o1 <= 2.40:
-        oranlar["İY/MS 1/1"] = round(max(1.65, o1 * 1.48), 2)
-    if "İY/MS 2/2" not in oranlar and o2 <= 2.40:
-        oranlar["İY/MS 2/2"] = round(max(1.65, o2 * 1.48), 2)
-    if "H2 (-1.5)" not in oranlar and o2 <= 1.75:
-        oranlar["H2 (-1.5)"] = round(max(1.55, o2 * 1.38), 2)
+    u15 = oranlar.get("1.5 Üst")
+    if not u15:
+        u15 = round(max(1.30, min(1.75, 1.26 + (fav_odd - 1.30) * 0.16)), 2)
+        oranlar["1.5 Üst"] = u15
 
-    if canli:
-        dk, _ = mac_dakikasi_coz(dk_str, gecen_dk)
-        for k, val in list(oranlar.items()):
-            fval = float(val)
-            if k in ("2.5 Üst", "KG Var") and 45 <= dk <= 75:
-                oranlar[k] = round(max(1.50, fval * 0.97), 2)
-            elif k in ("2.5 Üst", "KG Var") and dk > 75:
-                oranlar[k] = round(min(3.20, fval * 1.06), 2)
-            elif k.startswith("MS ") and dk >= 70:
-                oranlar[k] = round(max(1.15, fval * (0.95 if fval < 2.1 else 1.05)), 2)
+    if "1.5 Alt" not in oranlar:
+        oranlar["1.5 Alt"] = round(max(2.10, min(4.20, u15 * 2.15)), 2)
+
+    u25 = oranlar.get("2.5 Üst")
+    if not u25:
+        u25 = round(max(u15 + 0.25, min(2.45, 1.56 + (fav_odd - 1.40) * 0.26)), 2)
+        oranlar["2.5 Üst"] = u25
+
+    if "2.5 Alt" not in oranlar:
+        oranlar["2.5 Alt"] = round(max(1.45, min(2.35, 3.60 / max(1.45, u25))), 2)
+
+    if "3.5 Üst" not in oranlar:
+        oranlar["3.5 Üst"] = round(max(u25 + 0.65, min(3.80, u25 * 1.55)), 2)
+
+    if "KG Var" not in oranlar:
+        fark = abs(o1 - o2)
+        oranlar["KG Var"] = round(max(1.50, min(2.30, 1.62 + fark * 0.15)), 2)
+
+    if "KG Yok" not in oranlar:
+        kg_var = oranlar["KG Var"]
+        oranlar["KG Yok"] = round(max(1.45, min(2.25, 3.45 / max(1.45, kg_var))), 2)
+
+    if "İY/MS 1/1" not in oranlar and o1 <= 2.35:
+        oranlar["İY/MS 1/1"] = round(max(o1 + 0.45, o1 * 1.45), 2)
+    if "İY/MS 2/2" not in oranlar and o2 <= 2.35:
+        oranlar["İY/MS 2/2"] = round(max(o2 + 0.45, o2 * 1.45), 2)
+    if "H1 (-1.5)" not in oranlar and o1 <= 1.75:
+        oranlar["H1 (-1.5)"] = round(max(o1 + 0.35, o1 * 1.35), 2)
+    if "H2 (-1.5)" not in oranlar and o2 <= 1.75:
+        oranlar["H2 (-1.5)"] = round(max(o2 + 0.35, o2 * 1.35), 2)
 
     return oranlar
 
+# Daraltılmış güvenli skala: %80 - %92 bandı
 def orana_gore_guven(secim, oran, canli, gecen_dk, dk_str, is_top5_super, onem_puani):
     try:
         o = float(oran)
     except Exception:
-        o = 2.0
+        o = 1.80
 
-    if o <= 1.35:
-        baz = 86
-    elif o <= 1.55:
+    if o <= 1.45:
+        baz = 89
+    elif o <= 1.65:
+        baz = 87
+    elif o <= 1.85:
+        baz = 85
+    elif o <= 2.10:
         baz = 83
-    elif o <= 1.80:
-        baz = 80
-    elif o <= 2.15:
-        baz = 77
     else:
-        baz = 74
+        baz = 81
 
     pazar_etkisi = 0
     if secim in ("1.5 Üst", "ÇŞ 1-X", "ÇŞ 1-2", "ÇŞ X-2"):
         pazar_etkisi += 2
-    elif secim in ("2.5 Üst", "KG Var"):
+    elif secim in ("2.5 Üst", "2.5 Alt", "KG Var", "KG Yok"):
         pazar_etkisi += 1
 
     if is_top5_super:
-        pazar_etkisi += 2
+        pazar_etkisi += 1
     if onem_puani >= 50:
         pazar_etkisi += 1
 
     if not canli:
-        return max(72, min(92, baz + pazar_etkisi))
+        return max(80, min(92, baz + pazar_etkisi))
 
     faz = dakika_faz_bilgisi(dk_str, gecen_dk)
     dk = faz["dk"]
     dk_farki = 0
 
     if dk <= 15:
-        dk_farki = -1 if secim in ("2.5 Üst", "KG Var", "İY/MS 1/1", "İY/MS 2/2") else 0
+        dk_farki = -1 if secim in ("2.5 Üst", "3.5 Üst", "KG Var", "İY/MS 1/1", "İY/MS 2/2") else 0
     elif dk <= 35:
         dk_farki = 1 if secim in ("MS 1", "MS 2", "ÇŞ 1-X", "ÇŞ 1-2", "ÇŞ X-2", "1.5 Üst") else 0
     elif dk <= 45:
-        dk_farki = 2 if secim in ("1.5 Üst", "2.5 Üst", "KG Var") else 0
+        dk_farki = 1 if secim in ("1.5 Üst", "2.5 Üst", "KG Var") else 0
     elif dk <= 65:
-        dk_farki = 2 if secim in ("2.5 Üst", "KG Var", "MS 1", "MS 2") else 1
+        dk_farki = 1 if secim in ("2.5 Üst", "KG Var", "MS 1", "MS 2") else 0
     elif dk <= 78:
-        dk_farki = 1 if (secim in ("2.5 Üst", "KG Var") or o <= 1.75) else -2
+        dk_farki = 0 if o <= 1.85 else -1
     else:
-        dk_farki = -3 if secim in ("2.5 Üst", "KG Var") else -2
+        dk_farki = -2 if secim in ("2.5 Üst", "3.5 Üst", "KG Var") else -1
 
     skoru = (baz + pazar_etkisi + dk_farki) * faz["canli_carpan"]
-    return max(71, min(93, int(round(skoru))))
+    return max(80, min(92, int(round(skoru))))
 
 def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, is_top5_super):
     secenek_guvenleri = {}
@@ -346,8 +386,8 @@ def mac_analizi_olustur(oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, 
     pazar_adi = PAZAR_GRUPLARI.get(en_iyi_secim, "Maç Sonucu")
 
     faz = dakika_faz_bilgisi(dk_str, gecen_dk)
-    gemini_guven = max(72, min(94, en_iyi_guven + (1 if canli and faz["dk"] <= 65 else 0)))
-    claude_guven = max(72, min(93, en_iyi_guven - (1 if canli and faz["dk"] > 75 else 0)))
+    gemini_guven = max(80, min(92, en_iyi_guven + (1 if canli and faz["dk"] <= 65 else 0)))
+    claude_guven = max(80, min(92, en_iyi_guven - (1 if canli and faz["dk"] > 75 else 0)))
 
     if canli and is_top5_super:
         not_metni = f"Canlı ({dk_str} • {faz['faz_adi']}) • 5 Büyük/Süper Lig: {en_iyi_secim} (%{en_iyi_guven}) • {faz['aksiyon']}"
@@ -368,7 +408,7 @@ BULTEN_VERISI = {
     "secimler": []
 }
 
-def maclari_donustur(games, limit=50):
+def maclari_donustur(games, limit=100):
     sonuclar = []
     for g in (games or []):
         if len(sonuclar) >= limit:
@@ -390,7 +430,8 @@ def maclari_donustur(games, limit=50):
         baz_oranlar = {}
         for bm in g.get("bookmakers", [])[:1]:
             for mkt in bm.get("markets", []):
-                if mkt.get("key") == "h2h":
+                mkt_key = mkt.get("key")
+                if mkt_key == "h2h":
                     for oc in mkt.get("outcomes", []):
                         price = float(oc.get("price", 1.35))
                         if oc.get("name") == home:
@@ -399,11 +440,17 @@ def maclari_donustur(games, limit=50):
                             baz_oranlar["MS 2"] = price
                         elif oc.get("name") == "Draw":
                             baz_oranlar["MS X"] = price
+                elif mkt_key == "totals":
+                    for oc in mkt.get("outcomes", []):
+                        if oc.get("name") == "Over" and float(oc.get("point", 0)) == 2.5:
+                            baz_oranlar["2.5 Üst"] = float(oc.get("price", 1.85))
+                        elif oc.get("name") == "Under" and float(oc.get("point", 0)) == 2.5:
+                            baz_oranlar["2.5 Alt"] = float(oc.get("price", 1.85))
 
         if baz_oranlar:
-            oranlar = tum_pazar_oranlari_turet(baz_oranlar, canli=canli, dk_str=dk_str, gecen_dk=gecen_dk)
+            oranlar = tum_pazar_oranlari_turet(baz_oranlar)
             is_top5_super = bes_buyuk_veya_super_lig_mu(f"{home} - {away}", spor_adi, spor_key)
-            onem_puani = onem_puani_hesapla(home, away, spor_adi, spor_key, oranlar)
+            onem_puani = otomatik_onem_puani(home, away, spor_adi, spor_key, oranlar, canli)
             en_iyi_secim, pazar_adi, secenek_guvenleri, gemini_guven, claude_guven, not_metni = mac_analizi_olustur(
                 oranlar, canli, gecen_dk, dk_str, spor_adi, onem_puani, is_top5_super
             )
@@ -442,10 +489,10 @@ def oranlari_cek():
     canli_liste = []
     gorulen_maclar = set()
 
-    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h"
+    url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals"
     try:
         games = api_istegi_at(url)
-        for item in maclari_donustur(games, limit=80):
+        for item in maclari_donustur(games, limit=120):
             anahtar = item["mac"].lower()
             if anahtar in gorulen_maclar:
                 continue
@@ -460,8 +507,8 @@ def oranlari_cek():
     canli_liste.sort(key=lambda x: x.get("onem_puani", 0), reverse=True)
     baslamayan_liste.sort(key=lambda x: x.get("onem_puani", 0), reverse=True)
 
-    birlesik = (canli_liste[:15] + baslamayan_liste[:25])[:MAX_SECIM_SAYISI]
-    print(f"Futbol Toplam: {len(birlesik)} | Canli: {len(canli_liste[:15])} | Baslamayan: {len(baslamayan_liste[:25])}")
+    birlesik = (canli_liste[:30] + baslamayan_liste[:50])[:MAX_SECIM_SAYISI]
+    print(f"Futbol Toplam: {len(birlesik)} | Canli: {len(canli_liste[:30])} | Baslamayan: {len(baslamayan_liste[:50])}")
 
     if not birlesik:
         return {**BULTEN_VERISI, "tarih": bugun}
