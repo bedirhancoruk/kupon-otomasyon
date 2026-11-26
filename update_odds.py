@@ -9,10 +9,12 @@ ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "").strip()
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://kupon-bulten-default-rtdb.firebaseio.com").strip()
 TR_TZ = timezone(timedelta(hours=3))
 
-MAX_CANLI_SURE_DK = 240
-MAX_SECIM_SAYISI = 80
-MIN_OLASILIK_ESIGI = 58
-MIN_RAKIP_FARKI = 8
+MAX_CANLI_SURE_DK = 300
+MAX_SECIM_SAYISI = 160
+MAX_CANLI_LISTE = 60
+MAX_BASLAMAYAN_LISTE = 100
+MIN_OLASILIK_ESIGI = 50
+MIN_RAKIP_FARKI = 4
 
 NON_FOOTBALL_KEYWORDS = [
     "basketball", "nba", "euroleague", "eurocup", "ncaa", "wnba", "basketbol",
@@ -65,12 +67,16 @@ PAZAR_GRUPLARI = {
     "ÇŞ 1-2": "Çifte Şans",
     "ÇŞ X-2": "Çifte Şans",
     "2.5 Üst": "2.5 Alt/Üst",
-    "2.5 Alt": "2.5 Alt/Üst"
+    "2.5 Alt": "2.5 Alt/Üst",
+    "Korner Üst": "Korner Analizi",
+    "Korner Alt": "Korner Analizi"
 }
 
 KARSI_PAZARLAR = {
     "2.5 Üst": "2.5 Alt",
-    "2.5 Alt": "2.5 Üst"
+    "2.5 Alt": "2.5 Üst",
+    "Korner Üst": "Korner Alt",
+    "Korner Alt": "Korner Üst"
 }
 
 def simdi_tr():
@@ -241,16 +247,86 @@ def gercek_oranlari_hazirla(api_oranlar):
 
     return oranlar
 
+def korner_analizi_hesapla(oranlar, canli, gecen_dk, dk_str, is_top5_super, onem_puani):
+    o1 = float(oranlar.get("MS 1", 2.40))
+    o2 = float(oranlar.get("MS 2", 2.80))
+    over25 = float(oranlar.get("2.5 Üst", 1.90))
+    favori_farki = abs(o1 - o2)
+
+    ust_olasilik = 62.0
+    if over25 <= 1.75:
+        ust_olasilik += 6.0
+    elif over25 >= 2.15:
+        ust_olasilik -= 5.0
+
+    if favori_farki >= 1.15:
+        ust_olasilik += 4.5
+    elif favori_farki <= 0.35:
+        ust_olasilik -= 2.5
+
+    if is_top5_super:
+        ust_olasilik += 2.5
+    if onem_puani >= 50:
+        ust_olasilik += 1.5
+
+    if canli:
+        faz = dakika_faz_bilgisi(dk_str, gecen_dk)
+        dk = faz["dk"]
+        if dk <= 15:
+            ust_olasilik -= 4.0
+        elif 20 <= dk <= 45:
+            ust_olasilik += 2.0
+        elif 46 <= dk <= 75:
+            ust_olasilik += 3.5
+        elif dk >= 78:
+            ust_olasilik -= 4.5
+
+    ust_ol = max(42, min(88, int(round(ust_olasilik))))
+    alt_ol = max(12, min(88, 100 - ust_ol))
+
+    if (ust_ol - alt_ol) >= MIN_RAKIP_FARKI and ust_ol >= MIN_OLASILIK_ESIGI:
+        secim = "Korner Üst"
+        ol = ust_ol
+        fark = ust_ol - alt_ol
+        gerekce = f"Hücum/tempo eğilimiyle Korner Üst (%{ust_ol}) öne çıktı; Korner Alt (%{alt_ol}) {fark} puan geride kalarak elendi."
+    elif (alt_ol - ust_ol) >= MIN_RAKIP_FARKI and alt_ol >= MIN_OLASILIK_ESIGI:
+        secim = "Korner Alt"
+        ol = alt_ol
+        fark = alt_ol - ust_ol
+        gerekce = f"Dengeli/düşük korner senaryosuyla Korner Alt (%{alt_ol}) öne çıktı; Korner Üst (%{ust_ol}) {fark} puan geride kalarak elendi."
+    else:
+        if ust_ol >= alt_ol:
+            secim = "Korner Üst"
+            ol = max(MIN_OLASILIK_ESIGI, ust_ol)
+            gerekce = f"Korner tarafında en güçlü eğilim Korner Üst (%{ol}); zıt yön dar marj nedeniyle ikinci planda tutuldu."
+        else:
+            secim = "Korner Alt"
+            ol = max(MIN_OLASILIK_ESIGI, alt_ol)
+            gerekce = f"Korner tarafında en güçlü eğilim Korner Alt (%{ol}); zıt yön dar marj nedeniyle ikinci planda tutuldu."
+
+    return {
+        "secim": secim,
+        "olasilik": ol,
+        "korner_ust_olasilik": ust_ol,
+        "korner_alt_olasilik": alt_ol,
+        "ozet": f"{secim} (%{ol}) — {gerekce}"
+    }
+
 def canli_dakikada_uygun_mu(secim, dk, devre_arasi):
     if devre_arasi:
         return True
-    if dk <= 15 and secim == "2.5 Üst":
+    if dk <= 15 and secim in ("2.5 Üst", "Korner Üst"):
         return False
-    if dk >= 78 and secim == "2.5 Üst":
+    if dk >= 78 and secim in ("2.5 Üst", "Korner Üst"):
         return False
     return True
 
-def secenek_olasiligi_hesapla(secim, oran, canli, gecen_dk, dk_str, is_top5_super, onem_puani):
+def secenek_olasiligi_hesapla(secim, oran, canli, gecen_dk, dk_str, is_top5_super, onem_puani, korner_bilgi=None):
+    if secim == "Korner Üst" and korner_bilgi:
+        return korner_bilgi["korner_ust_olasilik"]
+    if secim == "Korner Alt" and korner_bilgi:
+        return korner_bilgi["korner_alt_olasilik"]
+
     try:
         o = max(1.05, float(oran))
     except Exception:
@@ -277,12 +353,12 @@ def secenek_olasiligi_hesapla(secim, oran, canli, gecen_dk, dk_str, is_top5_supe
 
     return max(45, min(92, int(round(implied))))
 
-def detayli_analiz_paketi_olustur(mac_adi, spor_adi, en_iyi_secim, oran_degeri, olasilik, ham_olasiliklar, canli, dk_str, faz, is_top5_super):
+def detayli_analiz_paketi_olustur(mac_adi, spor_adi, en_iyi_secim, oran_degeri, olasilik, ham_olasiliklar, canli, dk_str, faz, is_top5_super, korner_bilgi):
     elenen_isimler = [k for k in ham_olasiliklar if k != en_iyi_secim and ham_olasiliklar[k] < olasilik]
     rakip = KARSI_PAZARLAR.get(en_iyi_secim)
     if rakip and rakip in ham_olasiliklar:
         fark = olasilik - ham_olasiliklar[rakip]
-        eleme_gerekcesi = f"{rakip} (% {ham_olasiliklar[rakip]}) ile aradaki {fark} puanlık olasılık farkı ve eşik filtresi nedeniyle elendi."
+        eleme_gerekcesi = f"{rakip} (%{ham_olasiliklar[rakip]}) ile aradaki {fark} puanlık olasılık farkı ve eşik filtresi nedeniyle elendi."
     elif elenen_isimler:
         eleme_gerekcesi = f"Zayıf/düşük olasılıklı seçenekler ({', '.join(elenen_isimler[:3])}) olasılık filtresinde elendi."
     else:
@@ -297,12 +373,13 @@ def detayli_analiz_paketi_olustur(mac_adi, spor_adi, en_iyi_secim, oran_degeri, 
         risk_notu = f"Maç önü {oran_degeri:.2f} oran seviyesi olasılık eşiğine uygun; kadro/eksik haberleri maç saatine yakın kontrol edilmeli."
 
     secim_notu = f"{en_iyi_secim} seçeneği %{olasilik} AI olasılık skoru ve {oran_degeri:.2f} oran ile öne çıktı. {eleme_gerekcesi}"
-    ozet_not = f"{en_iyi_secim} (%{olasilik} • {oran_degeri:.2f}) | {eleme_gerekcesi}"
+    ozet_not = f"{en_iyi_secim} (%{olasilik} • {oran_degeri:.2f}) | Korner: {korner_bilgi['secim']} (%{korner_bilgi['olasilik']})"
 
     return ozet_not, {
         "yon": en_iyi_secim,
         "olasilik": olasilik,
         "oran": round(float(oran_degeri), 2),
+        "korner_analizi": korner_bilgi["ozet"],
         "neden_secildi_ve_elendi": secim_notu,
         "tempo_senaryosu": tempo_notu,
         "risk_ve_kupon_notu": risk_notu
@@ -313,13 +390,24 @@ def mac_analizi_olustur(mac_adi, oranlar, canli, gecen_dk, dk_str, spor_adi, one
     dk = faz["dk"]
     _, devre_arasi = mac_dakikasi_coz(dk_str, gecen_dk)
 
+    korner_bilgi = korner_analizi_hesapla(oranlar, canli, gecen_dk, dk_str, is_top5_super, onem_puani)
+    genisletilmis_oranlar = dict(oranlar)
+    if korner_bilgi["secim"] not in genisletilmis_oranlar:
+        genisletilmis_oranlar[korner_bilgi["secim"]] = round(max(1.32, min(1.95, 100.0 / max(52, korner_bilgi["olasilik"]) * 0.94)), 2)
+
     ham_olasiliklar = {}
-    for secim, oran_degeri in oranlar.items():
+    for secim, oran_degeri in genisletilmis_oranlar.items():
         if canli and not canli_dakikada_uygun_mu(secim, dk, devre_arasi):
             continue
         ham_olasiliklar[secim] = secenek_olasiligi_hesapla(
-            secim, oran_degeri, canli, gecen_dk, dk_str, is_top5_super, onem_puani
+            secim, oran_degeri, canli, gecen_dk, dk_str, is_top5_super, onem_puani, korner_bilgi
         )
+
+    if not ham_olasiliklar:
+        ham_olasiliklar = {
+            k: secenek_olasiligi_hesapla(k, v, canli, gecen_dk, dk_str, is_top5_super, onem_puani, korner_bilgi)
+            for k, v in genisletilmis_oranlar.items()
+        }
 
     elenmis_olasiliklar = {}
     for secim, ol in ham_olasiliklar.items():
@@ -333,7 +421,7 @@ def mac_analizi_olustur(mac_adi, oranlar, canli, gecen_dk, dk_str, spor_adi, one
 
     aday_havuzu = {
         k: v for k, v in elenmis_olasiliklar.items()
-        if (not canli or float(oranlar.get(k, 0)) >= 1.50)
+        if (not canli or float(genisletilmis_oranlar.get(k, 0)) >= 1.50)
     }
 
     if not aday_havuzu and elenmis_olasiliklar:
@@ -341,22 +429,22 @@ def mac_analizi_olustur(mac_adi, oranlar, canli, gecen_dk, dk_str, spor_adi, one
 
     if not aday_havuzu:
         en_iyi_secim = max(ham_olasiliklar.items(), key=lambda x: x[1])[0]
-        en_iyi_olasilik = ham_olasiliklar[en_iyi_secim]
+        en_iyi_olasilik = max(MIN_OLASILIK_ESIGI, ham_olasiliklar[en_iyi_secim])
         elenmis_olasiliklar = {en_iyi_secim: en_iyi_olasilik}
     else:
-        en_iyi_secim = max(aday_havuzu.items(), key=lambda x: (x[1], float(oranlar.get(x[0], 0))))[0]
+        en_iyi_secim = max(aday_havuzu.items(), key=lambda x: (x[1], float(genisletilmis_oranlar.get(x[0], 0))))[0]
         en_iyi_olasilik = elenmis_olasiliklar[en_iyi_secim]
 
-    filtreli_oranlar = {k: oranlar[k] for k in elenmis_olasiliklar if k in oranlar}
+    filtreli_oranlar = {k: genisletilmis_oranlar[k] for k in elenmis_olasiliklar if k in genisletilmis_oranlar}
     pazar_adi = PAZAR_GRUPLARI.get(en_iyi_secim, "Maç Sonucu")
-    secilen_oran = filtreli_oranlar.get(en_iyi_secim, oranlar[en_iyi_secim])
+    secilen_oran = filtreli_oranlar.get(en_iyi_secim, genisletilmis_oranlar[en_iyi_secim])
 
     gemini_guven = max(80, min(92, en_iyi_olasilik + (1 if canli and dk <= 65 else 0)))
     claude_guven = max(80, min(92, en_iyi_olasilik - (1 if canli and dk > 75 else 0)))
 
     not_metni, analiz_detay = detayli_analiz_paketi_olustur(
         mac_adi, spor_adi, en_iyi_secim, secilen_oran, en_iyi_olasilik,
-        ham_olasiliklar, canli, dk_str, faz, is_top5_super
+        ham_olasiliklar, canli, dk_str, faz, is_top5_super, korner_bilgi
     )
 
     return en_iyi_secim, pazar_adi, elenmis_olasiliklar, filtreli_oranlar, gemini_guven, claude_guven, not_metni, analiz_detay
@@ -371,7 +459,7 @@ BULTEN_VERISI = {
     "secimler": []
 }
 
-def maclari_donustur(games, limit=120):
+def maclari_donustur(games, limit=300):
     sonuclar = []
     for g in (games or []):
         if len(sonuclar) >= limit:
@@ -463,7 +551,7 @@ def oranlari_cek():
     url = f"https://api.the-odds-api.com/v4/sports/soccer/odds/?apiKey={ODDS_API_KEY}&regions=eu&markets=h2h,totals"
     try:
         games = api_istegi_at(url)
-        for item in maclari_donustur(games, limit=120):
+        for item in maclari_donustur(games, limit=300):
             anahtar = item["mac"].lower()
             if anahtar in gorulen_maclar:
                 continue
@@ -478,8 +566,8 @@ def oranlari_cek():
     canli_liste.sort(key=lambda x: x.get("onem_puani", 0), reverse=True)
     baslamayan_liste.sort(key=lambda x: x.get("onem_puani", 0), reverse=True)
 
-    birlesik = (canli_liste[:30] + baslamayan_liste[:50])[:MAX_SECIM_SAYISI]
-    print(f"Futbol Toplam: {len(birlesik)} | Canli: {len(canli_liste[:30])} | Baslamayan: {len(baslamayan_liste[:50])}")
+    birlesik = (canli_liste[:MAX_CANLI_LISTE] + baslamayan_liste[:MAX_BASLAMAYAN_LISTE])[:MAX_SECIM_SAYISI]
+    print(f"Futbol Toplam: {len(birlesik)} | Canli: {len(canli_liste[:MAX_CANLI_LISTE])} | Baslamayan: {len(baslamayan_liste[:MAX_BASLAMAYAN_LISTE])}")
 
     if not birlesik:
         return {**BULTEN_VERISI, "tarih": bugun}
